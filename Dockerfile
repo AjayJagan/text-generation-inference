@@ -267,16 +267,16 @@ WORKDIR /usr/src/flash-attention-v2
 RUN pip install -U packaging --no-cache-dir
 # Download the wheel or build it if a pre-compiled release doesn't exist
 # MAX_JOBS: For CI, limit number of parallel compilation threads otherwise the github runner goes OOM
-# For ARM64, build CPU-only version since CUDA is not available
+# For ARM64, skip flash attention since it's primarily a CUDA optimization
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
         MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
         "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/layer_norm" \
         "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/rotary" \
         --no-build-isolation --no-cache-dir; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Building CPU-only flash attention for ARM64"; \
-        FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
-        --no-build-isolation --no-cache-dir; \
+        echo "Skipping flash attention for ARM64 - using standard attention"; \
+        mkdir -p /usr/src/flash-attention-v2 && \
+        echo "# Empty wheel for ARM64" > /usr/src/flash-attention-v2/README.md; \
     fi
 
 
@@ -330,7 +330,11 @@ ENV PATH=/opt/tgis/bin:$PATH
 
 # Install flash attention v2 from the cache build
 RUN --mount=type=bind,from=flash-att-v2-cache,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir; \
+    else \
+        echo "Skipping flash attention installation for ARM64"; \
+    fi
 
 # Copy over the auto-gptq wheel and install it
 #RUN --mount=type=bind,from=auto-gptq-cache,src=/usr/src/auto-gptq-wheel,target=/usr/src/auto-gptq-wheel \
