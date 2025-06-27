@@ -13,6 +13,8 @@ ARG PYTORCH_VERSION=2.2.1
 
 ARG PYTHON_VERSION=3.11
 
+# Multi-arch support
+ARG TARGETARCH
 
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi:${BASE_UBI_IMAGE_TAG} as base
@@ -44,15 +46,25 @@ ENV CUDA_VERSION=12.1.0 \
     NV_CUDA_CUDART_VERSION=12.1.55-1 \
     NV_CUDA_COMPAT_VERSION=530.30.02-1
 
-RUN dnf install -y dnf-plugins-core && \
-    dnf config-manager \
-       --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo \
-    && dnf install -y \
-        cuda-cudart-12-1-${NV_CUDA_CUDART_VERSION} \
-        cuda-compat-12-1-${NV_CUDA_COMPAT_VERSION} \
-    && echo "/usr/local/nvidia/lib" >> /etc/ld.so.conf.d/nvidia.conf \
-    && echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf \
-    && dnf clean all
+ARG TARGETARCH
+
+# Architecture-specific CUDA repository setup
+# Note: ARM64 CUDA repository only contains cuDNN, not core CUDA packages
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        dnf install -y dnf-plugins-core && \
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo && \
+        dnf install -y \
+            cuda-cudart-12-1-${NV_CUDA_CUDART_VERSION} \
+            cuda-compat-12-1-${NV_CUDA_COMPAT_VERSION} && \
+        echo "/usr/local/nvidia/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
+        echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf && \
+        dnf clean all; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        echo "Skipping CUDA installation for ARM64 - using CPU-only PyTorch"; \
+    else \
+        echo "Unsupported architecture: $TARGETARCH"; \
+        exit 1; \
+    fi
 
 ENV CUDA_HOME="/usr/local/cuda" \
     PATH="/usr/local/nvidia/bin:${CUDA_HOME}/bin:${PATH}" \
@@ -69,18 +81,23 @@ ENV NV_CUDA_CUDART_DEV_VERSION=12.1.55-1 \
     NV_LIBNPP_DEV_VERSION=12.0.2.50-1 \
     NV_LIBNCCL_DEV_PACKAGE_VERSION=2.18.3-1+cuda12.1
 
-RUN dnf config-manager \
-       --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo \
-    && dnf install -y \
-        cuda-command-line-tools-12-1-${NV_CUDA_LIB_VERSION} \
-        cuda-libraries-devel-12-1-${NV_CUDA_LIB_VERSION} \
-        cuda-minimal-build-12-1-${NV_CUDA_LIB_VERSION} \
-        cuda-cudart-devel-12-1-${NV_CUDA_CUDART_DEV_VERSION} \
-        cuda-nvml-devel-12-1-${NV_NVML_DEV_VERSION} \
-        libcublas-devel-12-1-${NV_LIBCUBLAS_DEV_VERSION} \
-        libnpp-devel-12-1-${NV_LIBNPP_DEV_VERSION} \
-        libnccl-devel-${NV_LIBNCCL_DEV_PACKAGE_VERSION} \
-    && dnf clean all
+ARG TARGETARCH
+
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo && \
+        dnf install -y \
+            cuda-command-line-tools-12-1-${NV_CUDA_LIB_VERSION} \
+            cuda-libraries-devel-12-1-${NV_CUDA_LIB_VERSION} \
+            cuda-minimal-build-12-1-${NV_CUDA_LIB_VERSION} \
+            cuda-cudart-devel-12-1-${NV_CUDA_CUDART_DEV_VERSION} \
+            cuda-nvml-devel-12-1-${NV_NVML_DEV_VERSION} \
+            libcublas-devel-12-1-${NV_LIBCUBLAS_DEV_VERSION} \
+            libnpp-devel-12-1-${NV_LIBNPP_DEV_VERSION} \
+            libnccl-devel-${NV_LIBNCCL_DEV_PACKAGE_VERSION} && \
+        dnf clean all; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        echo "Skipping CUDA development packages for ARM64"; \
+    fi
 
 ENV LIBRARY_PATH="$CUDA_HOME/lib64/stubs"
 
@@ -89,12 +106,20 @@ ENV LIBRARY_PATH="$CUDA_HOME/lib64/stubs"
 # Using bookworm for compilation so the rust binaries get linked against libssl.so.3
 FROM rust:1.78-bookworm as rust-builder
 ARG PROTOC_VERSION
+ARG TARGETARCH
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 # Install protoc, no longer included in prost crate
 RUN cd /tmp && \
-    curl -L -O https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        curl -L -O https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        curl -L -O https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-aarch_64.zip; \
+    else \
+        echo "Unsupported architecture for protoc: $TARGETARCH"; \
+        exit 1; \
+    fi && \
     unzip protoc-*.zip -d /usr/local && rm protoc-*.zip
 
 WORKDIR /usr/src
@@ -150,11 +175,19 @@ ARG PYTORCH_INDEX
 ARG PYTORCH_VERSION
 ARG PYTHON_VERSION
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/site-packages
+ARG TARGETARCH
 
 WORKDIR /usr/src
 
-# Install specific version of torch
-RUN pip install torch=="$PYTORCH_VERSION+cpu" --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir
+# Install specific version of torch - architecture-specific
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        pip install torch=="$PYTORCH_VERSION+cpu" --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        pip install torch=="$PYTORCH_VERSION" --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir; \
+    else \
+        echo "Unsupported architecture for PyTorch: $TARGETARCH"; \
+        exit 1; \
+    fi
 
 COPY server/Makefile server/Makefile
 
@@ -184,13 +217,24 @@ ARG PYTORCH_INDEX
 ARG PYTORCH_VERSION
 ARG PYTHON_VERSION
 ARG MINIFORGE_VERSION=23.11.0-0
+ARG TARGETARCH
 
-# consistent arch support anywhere we compile CUDA code
-ENV TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX;8.9"
+# Set CUDA architecture list only for AMD64
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        echo 'export TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX;8.9"' >> /etc/environment; \
+    fi
 
 RUN dnf install -y unzip git ninja-build which && dnf clean all
 
-RUN curl -fsSL -v -o ~/miniforge3.sh -O  "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-$(uname)-$(uname -m).sh" && \
+# Architecture-specific miniforge installation
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        curl -fsSL -v -o ~/miniforge3.sh -O "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-Linux-x86_64.sh"; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        curl -fsSL -v -o ~/miniforge3.sh -O "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-Linux-aarch64.sh"; \
+    else \
+        echo "Unsupported architecture for miniforge: $TARGETARCH"; \
+        exit 1; \
+    fi && \
     chmod +x ~/miniforge3.sh && \
     bash ~/miniforge3.sh -b -p /opt/conda && \
     source "/opt/conda/etc/profile.d/conda.sh" && \
@@ -200,10 +244,18 @@ RUN curl -fsSL -v -o ~/miniforge3.sh -O  "https://github.com/conda-forge/minifor
 
 ENV PATH=/opt/tgis/bin/:$PATH
 
-# Install specific version of torch
+# Install specific version of torch - architecture-specific
 RUN pip install ninja==1.11.1.1 --no-cache-dir
 RUN pip install packaging --no-cache-dir
-RUN pip install torch==$PYTORCH_VERSION+cu121 --index-url "${PYTORCH_INDEX}/cu121" --no-cache-dir
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        pip install torch==$PYTORCH_VERSION+cu121 --index-url "${PYTORCH_INDEX}/cu121" --no-cache-dir; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        # For ARM64, use CPU-only PyTorch since CUDA PyTorch is not available
+        pip install torch==$PYTORCH_VERSION --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir; \
+    else \
+        echo "Unsupported architecture for PyTorch: $TARGETARCH"; \
+        exit 1; \
+    fi
 
 
 ## Build flash attention v2 ####################################################
@@ -215,10 +267,17 @@ WORKDIR /usr/src/flash-attention-v2
 RUN pip install -U packaging --no-cache-dir
 # Download the wheel or build it if a pre-compiled release doesn't exist
 # MAX_JOBS: For CI, limit number of parallel compilation threads otherwise the github runner goes OOM
-RUN MAX_JOBS=2  pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
-    "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/layer_norm" \
-    "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/rotary" \
-    --no-build-isolation --no-cache-dir
+# For ARM64, build CPU-only version since CUDA is not available
+RUN if [ "$TARGETARCH" = "amd64" ]; then \
+        MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
+        "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/layer_norm" \
+        "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/rotary" \
+        --no-build-isolation --no-cache-dir; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        echo "Building CPU-only flash attention for ARM64"; \
+        MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
+        --no-build-isolation --no-cache-dir; \
+    fi
 
 
 ## Install auto-gptq ###########################################################
@@ -262,6 +321,7 @@ FROM python-builder as python-installations
 ARG PYTHON_VERSION
 ARG AUTO_GPTQ_VERSION
 ARG SITE_PACKAGES=/opt/tgis/lib/python${PYTHON_VERSION}/site-packages
+ARG TARGETARCH
 
 COPY --from=build /opt/tgis /opt/tgis
 
@@ -287,7 +347,13 @@ COPY proto proto
 COPY server server
 # Extra url is required to install cuda-12 version of onnxruntime-gpu
 # Ref: https://onnxruntime.ai/docs/install/#install-onnx-runtime-gpu-cuda-12x
-RUN cd server && make gen-server && pip install ".[accelerate, ibm-fms, onnx-gpu, quantize]" --no-cache-dir --extra-index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
+# Architecture-specific installation
+RUN cd server && make gen-server && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        pip install ".[accelerate, ibm-fms, onnx-gpu, quantize]" --no-cache-dir --extra-index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/; \
+    else \
+        pip install ".[accelerate, ibm-fms, quantize]" --no-cache-dir; \
+    fi
 
 # Patch codegen model changes into transformers 4.35
 RUN cp server/transformers_patch/modeling_codegen.py ${SITE_PACKAGES}/transformers/models/codegen/modeling_codegen.py
