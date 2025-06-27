@@ -296,7 +296,7 @@ FROM python-builder as build
 
 # Build custom kernels
 COPY server/custom_kernels/ /usr/src/.
-RUN cd /usr/src && python setup.py build_ext && python setup.py install
+RUN cd /usr/src && TARGETARCH=$TARGETARCH python setup.py build_ext && python setup.py install
 
 
 ## Flash attention v2 cached build image #######################################
