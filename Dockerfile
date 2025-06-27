@@ -275,7 +275,7 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
         --no-build-isolation --no-cache-dir; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
         echo "Building CPU-only flash attention for ARM64"; \
-        MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
+        FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
         --no-build-isolation --no-cache-dir; \
     fi
 
