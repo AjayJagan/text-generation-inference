@@ -104,7 +104,7 @@ ENV LIBRARY_PATH="$CUDA_HOME/lib64/stubs"
 
 ## Rust builder ################################################################
 # Using bookworm for compilation so the rust binaries get linked against libssl.so.3
-FROM rust:1.78-bookworm as rust-builder
+FROM rust:1.88-bookworm as rust-builder
 ARG PROTOC_VERSION
 ARG TARGETARCH
 
