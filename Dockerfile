@@ -1,4 +1,7 @@
 ## Global Args #################################################################
+# Architecture Strategy:
+# - x86_64: Full CUDA support with GPU acceleration
+# - ARM64: CPU-only build (no CUDA packages available)
 ARG BASE_UBI_IMAGE_TAG=9.5
 ARG PROTOC_VERSION=25.3
 ARG PYTORCH_INDEX="https://download.pytorch.org/whl"
@@ -50,17 +53,11 @@ ENV CUDA_VERSION=12.1.0 \
 
 ARG TARGETARCH
 
-# Set CUDA repository based on architecture
-# Note: ARM64 CUDA support may be limited, so we check availability
+# Only install CUDA for x86_64 - ARM64 will be CPU-only
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Setting up ARM64 CUDA repository"; \
-        CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/aarch64/cuda-rhel9.repo"; \
-        # Check if CUDA packages are available for ARM64 \
-        dnf install -y dnf-plugins-core && \
-        dnf config-manager --add-repo $CUDA_REPO && \
-        # Try to install CUDA packages, but don't fail if they don't exist \
-        dnf install -y cuda-cudart-12-1-${NV_CUDA_CUDART_VERSION} cuda-compat-12-1-${NV_CUDA_COMPAT_VERSION} || \
-        echo "CUDA packages not available for ARM64, proceeding with CPU-only build" && \
+        echo "ARM64 detected - skipping CUDA installation (CPU-only build)"; \
+        # Create empty CUDA directories to satisfy path expectations \
+        mkdir -p /usr/local/cuda/bin /usr/local/cuda/lib64 /usr/local/nvidia/lib /usr/local/nvidia/lib64; \
         echo "/usr/local/nvidia/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
         echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf; \
     else \
@@ -91,23 +88,9 @@ ENV NV_CUDA_CUDART_DEV_VERSION=12.1.55-1 \
 
 ARG TARGETARCH
 
-# Set CUDA repository based on architecture
-# Note: ARM64 CUDA development packages may be limited
+# Only install CUDA development packages for x86_64
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Setting up ARM64 CUDA development repository"; \
-        CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/aarch64/cuda-rhel9.repo"; \
-        # Try to install CUDA development packages, but don't fail if they don't exist \
-        dnf config-manager --add-repo $CUDA_REPO && \
-        dnf install -y \
-            cuda-command-line-tools-12-1-${NV_CUDA_LIB_VERSION} \
-            cuda-libraries-devel-12-1-${NV_CUDA_LIB_VERSION} \
-            cuda-minimal-build-12-1-${NV_CUDA_LIB_VERSION} \
-            cuda-cudart-devel-12-1-${NV_CUDA_CUDART_DEV_VERSION} \
-            cuda-nvml-devel-12-1-${NV_NVML_DEV_VERSION} \
-            libcublas-devel-12-1-${NV_LIBCUBLAS_DEV_VERSION} \
-            libnpp-devel-12-1-${NV_LIBNPP_DEV_VERSION} \
-            libnccl-devel-${NV_LIBNCCL_DEV_PACKAGE_VERSION} || \
-        echo "CUDA development packages not available for ARM64, proceeding with CPU-only build"; \
+        echo "ARM64 detected - skipping CUDA development packages (CPU-only build)"; \
     else \
         echo "Setting up x86_64 CUDA development repository"; \
         CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo"; \
@@ -235,17 +218,8 @@ ARG MINIFORGE_VERSION=23.11.0-0
 ARG TARGETARCH
 ARG TARGETOS
 
-# Set CUDA architecture list based on target architecture
-# For ARM64, we need to support different compute capabilities
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Setting CUDA architecture for ARM64"; \
-        export TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX;8.9;9.0"; \
-    else \
-        echo "Setting CUDA architecture for x86_64"; \
-        export TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX;8.9"; \
-    fi
-
-# consistent arch support anywhere we compile CUDA code
+# Set CUDA architecture list for compilation
+# Supports both x86_64 and ARM64 compute capabilities
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX;8.9;9.0"
 
 RUN dnf install -y unzip git ninja-build which && dnf clean all
@@ -272,13 +246,8 @@ RUN pip install packaging --no-cache-dir
 
 # Install PyTorch with CUDA support based on architecture
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Installing PyTorch for ARM64"; \
-        # For ARM64, install CPU-only PyTorch (CUDA not available) \
-        pip install torch==$PYTORCH_VERSION --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir || \
-        pip install torch==2.2.0 --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir || \
-        pip install torch==2.1.2 --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir || \
-        (echo "Installing latest available PyTorch for ARM64" && \
-         pip install torch --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir); \
+        echo "Installing CPU-only PyTorch for ARM64"; \
+        pip install torch==$PYTORCH_VERSION --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir; \
     else \
         echo "Installing PyTorch for x86_64 with CUDA support"; \
         pip install torch==$PYTORCH_VERSION+cu121 --index-url "${PYTORCH_INDEX}/cu121" --no-cache-dir; \
@@ -294,14 +263,9 @@ WORKDIR /usr/src/flash-attention-v2
 
 RUN pip install -U packaging --no-cache-dir
 
-# Handle Flash Attention build based on architecture
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Skipping Flash Attention CUDA compilation for ARM64 (CPU-only build)"; \
-        # Create empty wheel directory to satisfy the build process \
-        mkdir -p /usr/src/flash-attention-v2; \
-    else \
+# Build Flash Attention only for x86_64 (CUDA required)
+RUN if [ "$TARGETARCH" != "arm64" ]; then \
         echo "Building Flash Attention for x86_64 with CUDA support"; \
-        # Download the wheel or build it if a pre-compiled release doesn't exist \
         # MAX_JOBS: For CI, limit number of parallel compilation threads otherwise the github runner goes OOM \
         MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
             "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/layer_norm" \
@@ -358,11 +322,9 @@ COPY --from=build /opt/tgis /opt/tgis
 # `pip` is installed in the venv here
 ENV PATH=/opt/tgis/bin:$PATH
 
-# Install flash attention v2 from the cache build
+# Install Flash Attention only for x86_64
 RUN --mount=type=bind,from=flash-att-v2-cache,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Skipping Flash Attention installation for ARM64 (CPU-only build)"; \
-    else \
+    if [ "$TARGETARCH" != "arm64" ]; then \
         pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir; \
     fi
 
@@ -370,11 +332,8 @@ RUN --mount=type=bind,from=flash-att-v2-cache,src=/usr/src/flash-attention-v2,ta
 #RUN --mount=type=bind,from=auto-gptq-cache,src=/usr/src/auto-gptq-wheel,target=/usr/src/auto-gptq-wheel \
 #    pip install /usr/src/auto-gptq-wheel/*.whl --no-cache-dir
 
-# Install auto-gptq based on architecture
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Skipping auto-gptq installation for ARM64 (CPU-only build, requires CUDA)"; \
-    else \
-        echo "Installing auto-gptq for x86_64 with CUDA support"; \
+# Install auto-gptq only for x86_64 (CUDA required)
+RUN if [ "$TARGETARCH" != "arm64" ]; then \
         pip install auto-gptq=="${AUTO_GPTQ_VERSION}" --no-cache-dir; \
     fi
 
@@ -383,14 +342,12 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 RUN dnf install -y git && dnf clean all
 COPY proto proto
 COPY server server
-# Install server dependencies based on architecture
+# Install server dependencies
 RUN cd server && make gen-server && \
     if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Installing server for ARM64 (CPU-only)"; \
         pip install ".[accelerate, ibm-fms, quantize]" --no-cache-dir && \
         pip install onnxruntime --no-cache-dir; \
     else \
-        echo "Installing server for x86_64 with GPU support"; \
         pip install ".[accelerate, ibm-fms, onnx-gpu, quantize]" --no-cache-dir --extra-index-url=https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/; \
     fi
 
