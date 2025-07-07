@@ -1,4 +1,8 @@
 ## Global Args #################################################################
+# Architecture Strategy:
+# - x86_64: Use official PyTorch CUDA wheels
+# - ARM64: Build PyTorch from source with CUDA support (for NVIDIA Grace Hopper Superchip)
+#   This ensures full GPU acceleration on ARM64 systems with CUDA
 
 ARG BASE_UBI_IMAGE_TAG=9.5
 ARG PROTOC_VERSION=25.3
@@ -260,8 +264,28 @@ RUN pip install packaging --no-cache-dir
 
 # Install PyTorch with CUDA support based on architecture
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "Installing CPU-only PyTorch for ARM64"; \
-        pip install torch==$PYTORCH_VERSION --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir; \
+        if ldconfig -p | grep -q libcudart; then \
+            echo "Building PyTorch from source for ARM64 with CUDA support"; \
+            dnf install -y cmake ninja-build gcc gcc-c++ git && \
+            git clone --recursive --depth 1 --branch v${PYTORCH_VERSION} https://github.com/pytorch/pytorch.git /tmp/pytorch && \
+            cd /tmp/pytorch && \
+            export USE_CUDA=1 && \
+            export USE_DISTRIBUTED=1 && \
+            export USE_MKLDNN=1 && \
+            export USE_OPENMP=1 && \
+            export USE_NCCL=1 && \
+            export USE_SYSTEM_NCCL=1 && \
+            export USE_MPI=0 && \
+            export USE_GLOO=1 && \
+            export USE_QNNPACK=1 && \
+            export USE_PYTORCH_QNNPACK=1 && \
+            python setup.py bdist_wheel && \
+            pip install dist/*.whl --no-cache-dir && \
+            cd / && rm -rf /tmp/pytorch; \
+        else \
+            echo "Installing PyTorch for ARM64 (CPU-only)"; \
+            pip install torch==$PYTORCH_VERSION --index-url "${PYTORCH_INDEX}/cpu" --no-cache-dir; \
+        fi; \
     else \
         echo "Installing PyTorch for x86_64 with CUDA support"; \
         pip install torch==$PYTORCH_VERSION+cu121 --index-url "${PYTORCH_INDEX}/cu121" --no-cache-dir; \
@@ -277,14 +301,18 @@ WORKDIR /usr/src/flash-attention-v2
 
 RUN pip install -U packaging --no-cache-dir
 
-# Build Flash Attention (skip for ARM64 if CUDA not available)
+# Build Flash Attention from source
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "ARM64 detected - attempting Flash Attention build"; \
-        MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
-            "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/layer_norm" \
-            "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/rotary" \
-            --no-build-isolation --no-cache-dir || \
-        echo "Flash Attention build failed for ARM64 (expected - CUDA not available)"; \
+        echo "Building Flash Attention from source for ARM64 with CUDA support"; \
+        # Clone and build Flash Attention with CUDA support \
+        git clone --recursive --depth 1 --branch ${FLASH_ATT_VERSION} https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention && \
+        cd /tmp/flash-attention && \
+        # Build with CUDA support for ARM64 \
+        export MAX_JOBS=2 && \
+        export TORCH_CUDA_ARCH_LIST="8.0;8.6+PTX;8.9;9.0" && \
+        pip install -e . --no-cache-dir || \
+        echo "Flash Attention build failed for ARM64 (falling back to standard attention)"; \
+        cd / && rm -rf /tmp/flash-attention; \
     else \
         echo "Building Flash Attention for x86_64 with CUDA support"; \
         # MAX_JOBS: For CI, limit number of parallel compilation threads otherwise the github runner goes OOM \
@@ -356,10 +384,17 @@ RUN --mount=type=bind,from=flash-att-v2-cache,src=/usr/src/flash-attention-v2,ta
 #RUN --mount=type=bind,from=auto-gptq-cache,src=/usr/src/auto-gptq-wheel,target=/usr/src/auto-gptq-wheel \
 #    pip install /usr/src/auto-gptq-wheel/*.whl --no-cache-dir
 
-# Install auto-gptq (skip for ARM64 if CUDA not available)
+# Install auto-gptq (build from source for ARM64+CUDA)
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        pip install auto-gptq=="${AUTO_GPTQ_VERSION}" --no-cache-dir || \
-        echo "auto-gptq installation skipped for ARM64 (CUDA not available)"; \
+        if ldconfig -p | grep -q libcudart; then \
+            echo "Building auto-gptq from source for ARM64 with CUDA support"; \
+            git clone --recursive --depth 1 --branch v${AUTO_GPTQ_VERSION} https://github.com/AutoGPTQ/AutoGPTQ.git /tmp/auto-gptq && \
+            cd /tmp/auto-gptq && \
+            pip install -e . --no-cache-dir && \
+            cd / && rm -rf /tmp/auto-gptq; \
+        else \
+            echo "auto-gptq installation skipped for ARM64 (CUDA not available)"; \
+        fi; \
     else \
         pip install auto-gptq=="${AUTO_GPTQ_VERSION}" --no-cache-dir; \
     fi
