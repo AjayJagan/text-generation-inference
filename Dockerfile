@@ -1,7 +1,5 @@
 ## Global Args #################################################################
-# Architecture Strategy:
-# - x86_64: Full CUDA support with GPU acceleration
-# - ARM64: CPU-only build (no CUDA packages available)
+
 ARG BASE_UBI_IMAGE_TAG=9.5
 ARG PROTOC_VERSION=25.3
 ARG PYTORCH_INDEX="https://download.pytorch.org/whl"
@@ -53,11 +51,15 @@ ENV CUDA_VERSION=12.1.0 \
 
 ARG TARGETARCH
 
-# Only install CUDA for x86_64 - ARM64 will be CPU-only
+# Install CUDA packages (skip for ARM64 if not available)
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "ARM64 detected - skipping CUDA installation (CPU-only build)"; \
-        # Create empty CUDA directories to satisfy path expectations \
-        mkdir -p /usr/local/cuda/bin /usr/local/cuda/lib64 /usr/local/nvidia/lib /usr/local/nvidia/lib64; \
+        echo "ARM64 detected - attempting CUDA installation"; \
+        CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/aarch64/cuda-rhel9.repo"; \
+        dnf install -y dnf-plugins-core && \
+        dnf config-manager --add-repo $CUDA_REPO && \
+        dnf install -y cuda-cudart-12-1-${NV_CUDA_CUDART_VERSION} cuda-compat-12-1-${NV_CUDA_COMPAT_VERSION} || \
+        (echo "CUDA packages not available for ARM64, creating empty directories" && \
+         mkdir -p /usr/local/cuda/bin /usr/local/cuda/lib64 /usr/local/nvidia/lib /usr/local/nvidia/lib64); \
         echo "/usr/local/nvidia/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
         echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf; \
     else \
@@ -88,9 +90,21 @@ ENV NV_CUDA_CUDART_DEV_VERSION=12.1.55-1 \
 
 ARG TARGETARCH
 
-# Only install CUDA development packages for x86_64
+# Install CUDA development packages (skip for ARM64 if not available)
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        echo "ARM64 detected - skipping CUDA development packages (CPU-only build)"; \
+        echo "ARM64 detected - attempting CUDA development installation"; \
+        CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/aarch64/cuda-rhel9.repo"; \
+        dnf config-manager --add-repo $CUDA_REPO && \
+        dnf install -y \
+            cuda-command-line-tools-12-1-${NV_CUDA_LIB_VERSION} \
+            cuda-libraries-devel-12-1-${NV_CUDA_LIB_VERSION} \
+            cuda-minimal-build-12-1-${NV_CUDA_LIB_VERSION} \
+            cuda-cudart-devel-12-1-${NV_CUDA_CUDART_DEV_VERSION} \
+            cuda-nvml-devel-12-1-${NV_NVML_DEV_VERSION} \
+            libcublas-devel-12-1-${NV_LIBCUBLAS_DEV_VERSION} \
+            libnpp-devel-12-1-${NV_LIBNPP_DEV_VERSION} \
+            libnccl-devel-${NV_LIBNCCL_DEV_PACKAGE_VERSION} || \
+        echo "CUDA development packages not available for ARM64"; \
     else \
         echo "Setting up x86_64 CUDA development repository"; \
         CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo"; \
@@ -263,8 +277,15 @@ WORKDIR /usr/src/flash-attention-v2
 
 RUN pip install -U packaging --no-cache-dir
 
-# Build Flash Attention only for x86_64 (CUDA required)
-RUN if [ "$TARGETARCH" != "arm64" ]; then \
+# Build Flash Attention (skip for ARM64 if CUDA not available)
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        echo "ARM64 detected - attempting Flash Attention build"; \
+        MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
+            "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/layer_norm" \
+            "git+https://github.com/Dao-AILab/flash-attention.git@${FLASH_ATT_VERSION}#subdirectory=csrc/rotary" \
+            --no-build-isolation --no-cache-dir || \
+        echo "Flash Attention build failed for ARM64 (expected - CUDA not available)"; \
+    else \
         echo "Building Flash Attention for x86_64 with CUDA support"; \
         # MAX_JOBS: For CI, limit number of parallel compilation threads otherwise the github runner goes OOM \
         MAX_JOBS=2 pip --verbose wheel --no-deps flash-attn==${FLASH_ATT_VERSION} \
@@ -322,9 +343,12 @@ COPY --from=build /opt/tgis /opt/tgis
 # `pip` is installed in the venv here
 ENV PATH=/opt/tgis/bin:$PATH
 
-# Install Flash Attention only for x86_64
+# Install Flash Attention (skip for ARM64 if not available)
 RUN --mount=type=bind,from=flash-att-v2-cache,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    if [ "$TARGETARCH" != "arm64" ]; then \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir || \
+        echo "Flash Attention installation skipped for ARM64"; \
+    else \
         pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir; \
     fi
 
@@ -332,8 +356,11 @@ RUN --mount=type=bind,from=flash-att-v2-cache,src=/usr/src/flash-attention-v2,ta
 #RUN --mount=type=bind,from=auto-gptq-cache,src=/usr/src/auto-gptq-wheel,target=/usr/src/auto-gptq-wheel \
 #    pip install /usr/src/auto-gptq-wheel/*.whl --no-cache-dir
 
-# Install auto-gptq only for x86_64 (CUDA required)
-RUN if [ "$TARGETARCH" != "arm64" ]; then \
+# Install auto-gptq (skip for ARM64 if CUDA not available)
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        pip install auto-gptq=="${AUTO_GPTQ_VERSION}" --no-cache-dir || \
+        echo "auto-gptq installation skipped for ARM64 (CUDA not available)"; \
+    else \
         pip install auto-gptq=="${AUTO_GPTQ_VERSION}" --no-cache-dir; \
     fi
 
