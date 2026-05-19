@@ -44,7 +44,7 @@ tracing = "^0.1.40"
 prost = "^0.12.4"
 tonic = { version = "^0.11.0", features = ["tls"] }
 tracing-subscriber = { version = "0.3.18", features = ["json", "env-filter"] }
-tracing-opentelemetry = "0.23.0"
+tracing-opentelemetry = "0.33.0"
 tokio-stream ="^0.1.15"
 unicode-segmentation = "^1.11.0"
 unicode-truncate = "^0.2.0"
