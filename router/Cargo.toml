@@ -53,4 +53,4 @@ opentelemetry_sdk = { version = "0.22.1", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.15.0"
 
 [build-dependencies]
-tonic-build = "^0.11.0"
+tonic-build = "^0.14.0"
