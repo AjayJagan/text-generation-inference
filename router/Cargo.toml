@@ -14,7 +14,7 @@ name = "text-generation-router"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.6.20", features = ["json"] }
+axum = { version = "0.8.0", features = ["json"] }
 axum-tracing-opentelemetry = "0.10.0"
 text-generation-client = { path = "client" }
 clap = { version = "^4.5.4", features = ["derive", "env"] }
